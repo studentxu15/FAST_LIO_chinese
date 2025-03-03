@@ -278,8 +278,11 @@ void lasermap_fov_segment()
 void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg) 
 {
     mtx_buffer.lock();
+    // 增加雷达帧计数 scan_count
     scan_count ++;
+    // 获取当前时间为 preprocess_start_time
     double preprocess_start_time = omp_get_wtime();
+    // 如果当前雷达帧时间戳小于上一帧时间，则报警，并清空 lidar_buffer
     if (msg->header.stamp.toSec() < last_timestamp_lidar)
     {
         ROS_ERROR("lidar loop back, clear buffer");
@@ -334,29 +337,37 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 
 void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) 
 {
+    // 增加发布计数
     publish_count ++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
+    // 将imu数据 msg_in 传递给 msg
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
 
+    // msg 的时间戳为原始时间 - 时间偏移量
     msg->header.stamp = ros::Time().fromSec(msg_in->header.stamp.toSec() - time_diff_lidar_to_imu);
+    // 对时间进行矫正
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
     {
         msg->header.stamp = \
         ros::Time().fromSec(timediff_lidar_wrt_imu + msg_in->header.stamp.toSec());
     }
 
+    // 时间传递给 timestamp
     double timestamp = msg->header.stamp.toSec();
 
     mtx_buffer.lock();
 
+    // 如果当前时间小于上一个imu时间，则报警，并清空 imu_buffer
     if (timestamp < last_timestamp_imu)
     {
         ROS_WARN("imu loop back, clear buffer");
         imu_buffer.clear();
     }
 
+    // 将 timestamp 传递给 last_timestamp_imu
     last_timestamp_imu = timestamp;
 
+    // 将 msg 加入到 imu_buffer
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();

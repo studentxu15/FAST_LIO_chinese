@@ -49,6 +49,8 @@ void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, Point
 
 void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
+  // 如果 time_unit 为 SEC， 缩放因子 缩放因子为 1000 
+  // 目的是为了转为毫秒
   switch (time_unit)
   {
     case SEC:
@@ -68,6 +70,7 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
       break;
   }
 
+  // 根据雷达类型，进行不同的变换，将变换后的点云传递给 pl_surf，最后传递给 pcl_out 输出
   switch (lidar_type)
   {
   case OUST64:
@@ -187,24 +190,31 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
+  // 将输入的 msg 给 pl_orig
   pcl::PointCloud<ouster_ros::Point> pl_orig;
   pcl::fromROSMsg(*msg, pl_orig);
+  //计算点的数量为 plsize， 并调整 pl_corn 和 pl_surf 的大小
   int plsize = pl_orig.size();
   pl_corn.reserve(plsize);
   pl_surf.reserve(plsize);
   if (feature_enabled)
   {
+    // 清空 pl_buff
     for (int i = 0; i < N_SCANS; i++)
     {
       pl_buff[i].clear();
       pl_buff[i].reserve(plsize);
     }
 
+    // 遍历每一个点
     for (uint i = 0; i < plsize; i++)
     {
+      // range 为 点xyz的平方
       double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y + pl_orig.points[i].z * pl_orig.points[i].z;
+      // 如果 range 小于 blind 的平方， 即跳过。
       if (range < (blind * blind)) continue;
       Eigen::Vector3d pt_vec;
+      // 将点的xyzi赋值给 added_pt， normal为0
       PointType added_pt;
       added_pt.x = pl_orig.points[i].x;
       added_pt.y = pl_orig.points[i].y;
@@ -213,13 +223,17 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
       added_pt.normal_x = 0;
       added_pt.normal_y = 0;
       added_pt.normal_z = 0;
+      // 计算偏航角 并转换为角度 yaw_angle
       double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.3;
+      // 角度调整为 -180度～180度范围
       if (yaw_angle >= 180.0)
         yaw_angle -= 360.0;
       if (yaw_angle <= -180.0)
         yaw_angle += 360.0;
 
+      // 点的时间 * 缩放因子，得到新的时间 curvature ，单位是毫秒
       added_pt.curvature = pl_orig.points[i].t * time_unit_scale;
+      // 如果ring 小于 N_SCANS，则在 pl_buff中加入 added_pt
       if(pl_orig.points[i].ring < N_SCANS)
       {
         pl_buff[pl_orig.points[i].ring].push_back(added_pt);
@@ -228,20 +242,27 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
     for (int j = 0; j < N_SCANS; j++)
     {
+      // 将各个ring 的点分别赋值给 pl
+      // 点的数量为 linesize
       PointCloudXYZI &pl = pl_buff[j];
       int linesize = pl.size();
       vector<orgtype> &types = typess[j];
       types.clear();
       types.resize(linesize);
       linesize--;
+      // 遍历从第一个点到倒数第二个点
       for (uint i = 0; i < linesize; i++)
       {
+        // 记录这个点的距离为 range
+        // 这个点与下一个的xyz轴距离为 vx,vy,vz
         types[i].range = sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
         vx = pl[i].x - pl[i + 1].x;
         vy = pl[i].y - pl[i + 1].y;
         vz = pl[i].z - pl[i + 1].z;
+        // 定义types的 dista 为当前点与下一个点距离的平方
         types[i].dista = vx * vx + vy * vy + vz * vz;
       }
+      // 计算最后一个点的距离
       types[linesize].range = sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
       give_feature(pl, types);
     }
@@ -453,6 +474,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types)
 {
+  // 一个ring的点的数量 plsize
   int plsize = pl.size();
   int plsize2;
   if(plsize == 0)
@@ -460,16 +482,20 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     printf("something wrong\n");
     return;
   }
+  // 定义无符号整数 head 为0
   uint head = 0;
 
+ // 找到距离大于 range的点的索引 head
   while(types[head].range < blind)
   {
     head++;
   }
 
   // Surf
+  // 如果 plsize > group_size（默认为8）,则 plsize2 = plsize - group_size ，否则为 0
   plsize2 = (plsize > group_size) ? (plsize - group_size) : 0;
 
+  // 定义两个向量
   Eigen::Vector3d curr_direct(Eigen::Vector3d::Zero());
   Eigen::Vector3d last_direct(Eigen::Vector3d::Zero());
 
@@ -478,15 +504,19 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
   int last_state = 0;
   int plane_type;
 
+  // 从当前点到 最后一个点 - 8 进行遍历
   for(uint i=head; i<plsize2; i++)
   {
+    // 如果距离小于 blind，则跳过
     if(types[i].range < blind)
     {
       continue;
     }
 
+    // 当前点的索引传递给 i2
     i2 = i;
 
+    // 调用 plane_judge 函数，传入点云 pl 和 types， 当前点的索引，下一个点的索引(默认为0)，向量 curr_direct
     plane_type = plane_judge(pl, types, i, i_nex, curr_direct);
     
     if(plane_type == 1)
@@ -525,52 +555,6 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
       i = i_nex;
       last_state = 0;
     }
-    // else if(plane_type == 0)
-    // {
-    //   if(last_state == 1)
-    //   {
-    //     uint i_nex_tem;
-    //     uint j;
-    //     for(j=last_i+1; j<=last_i_nex; j++)
-    //     {
-    //       uint i_nex_tem2 = i_nex_tem;
-    //       Eigen::Vector3d curr_direct2;
-
-    //       uint ttem = plane_judge(pl, types, j, i_nex_tem, curr_direct2);
-
-    //       if(ttem != 1)
-    //       {
-    //         i_nex_tem = i_nex_tem2;
-    //         break;
-    //       }
-    //       curr_direct = curr_direct2;
-    //     }
-
-    //     if(j == last_i+1)
-    //     {
-    //       last_state = 0;
-    //     }
-    //     else
-    //     {
-    //       for(uint k=last_i_nex; k<=i_nex_tem; k++)
-    //       {
-    //         if(k != i_nex_tem)
-    //         {
-    //           types[k].ftype = Real_Plane;
-    //         }
-    //         else
-    //         {
-    //           types[k].ftype = Poss_Plane;
-    //         }
-    //       }
-    //       i = i_nex_tem-1;
-    //       i_nex = i_nex_tem;
-    //       i2 = j-1;
-    //       last_state = 1;
-    //     }
-
-    //   }
-    // }
 
     last_i = i2;
     last_i_nex = i_nex;
@@ -776,6 +760,8 @@ void Preprocess::pub_func(PointCloudXYZI &pl, const ros::Time &ct)
 
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex, Eigen::Vector3d &curr_direct)
 {
+
+  // 定义 group_dis 为 disA *当前点的距离 + disB，group_dis 为它自己的平方
   double group_dis = disA*types[i_cur].range + disB;
   group_dis = group_dis * group_dis;
   // i_nex = i_cur;
@@ -784,20 +770,26 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
   vector<double> disarr;
   disarr.reserve(20);
 
+  // 从当前点到+8进行遍历
   for(i_nex=i_cur; i_nex<i_cur+group_size; i_nex++)
   {
+    // 如果有点小于 blind，则返回2
     if(types[i_nex].range < blind)
     {
       curr_direct.setZero();
       return 2;
     }
+    // 否则就加入到 disarr
     disarr.push_back(types[i_nex].dista);
   }
   
+  // for(;;) 会创建一个无限循环，因为它没有条件来终止循环
   for(;;)
   {
+    // 如果i_cur的i或者i_nex的i超过pl点的数量，则退出
     if((i_cur >= pl.size()) || (i_nex >= pl.size())) break;
 
+    // 如果有点小于 blind，则返回2
     if(types[i_nex].range < blind)
     {
       curr_direct.setZero();
