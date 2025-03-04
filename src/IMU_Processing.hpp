@@ -158,9 +158,15 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
 {
   /** 1. initializing the gravity, gyro bias, acc and gyro covariance
    ** 2. normalize the acceleration measurenments to unit gravity **/
+
+   /** 1. 初始化重力、陀螺仪零偏、加速度和陀螺仪协方差
+    ** 2. 将加速度测量标准化为单位重力 **/
   
   V3D cur_acc, cur_gyr;
   
+  // 如果是第一帧
+  // 将 加速度和角速度传递给 mean_acc 和 mean_gyr
+  // 开始时间传递给 first_lidar_time
   if (b_first_frame_)
   {
     Reset();
@@ -173,12 +179,16 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     first_lidar_time = meas.lidar_beg_time;
   }
 
+  // 遍历 Measure 中所有的imu数据
+  // 得到平均加速度和平均角速度 mean_acc 和 mean_gyr
+  // 计算加速度和陀螺仪数据的协方差矩阵 cov_acc 和 cov_gyr
   for (const auto &imu : meas.imu)
   {
     const auto &imu_acc = imu->linear_acceleration;
     const auto &gyr_acc = imu->angular_velocity;
     cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;
     cur_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
+
 
     mean_acc      += (cur_acc - mean_acc) / N;
     mean_gyr      += (cur_gyr - mean_gyr) / N;
@@ -191,9 +201,11 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
     N ++;
   }
   state_ikfom init_state = kf_state.get_x();
+  // 归一化重力加速度
   init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2);
   
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
+  // 设置 init_state.bg 为平均角速度
   init_state.bg  = mean_gyr;
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
@@ -342,9 +354,11 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
   if(meas.imu.empty()) {return;};
   ROS_ASSERT(meas.lidar != nullptr);
 
+  // 如果imu需要初始化
   if (imu_need_init_)
   {
     /// The very first lidar frame
+    // imu初始化
     IMU_init(meas, kf_state, init_iter_num);
 
     imu_need_init_ = true;

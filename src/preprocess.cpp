@@ -306,11 +306,13 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
     pcl::PointCloud<velodyne_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
+    // plsize 为点的数量
     int plsize = pl_orig.points.size();
     if (plsize == 0) return;
     pl_surf.reserve(plsize);
 
     /*** These variables only works when no point timestamps given ***/
+    // omega_l 为1毫秒所转的角度
     double omega_l = 0.361 * SCAN_RATE;       // scan angular velocity
     std::vector<bool> is_first(N_SCANS,true);
     std::vector<double> yaw_fp(N_SCANS, 0.0);      // yaw of first scan point
@@ -318,6 +320,8 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
     std::vector<float> time_last(N_SCANS, 0.0);  // last offset time
     /*****************************************************************/
 
+    // 如果最后一个点的时间大于0，则设置 given_offset_time 为 true
+    // 否则设为 false
     if (pl_orig.points[plsize - 1].time > 0)
     {
       given_offset_time = true;
@@ -325,11 +329,13 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
     else
     {
       given_offset_time = false;
+      // 第一个点的角度为 yaw_first，第一个点的ring为 layer_first
       double yaw_first = atan2(pl_orig.points[0].y, pl_orig.points[0].x) * 57.29578;
       double yaw_end  = yaw_first;
       int layer_first = pl_orig.points[0].ring;
       for (uint i = plsize - 1; i > 0; i--)
       {
+        // 如果当前点的ring 与第一个点的ring相同，则点的yaw角度为 yaw_end
         if (pl_orig.points[i].ring == layer_first)
         {
           yaw_end = atan2(pl_orig.points[i].y, pl_orig.points[i].x) * 57.29578;
@@ -360,9 +366,11 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
         added_pt.intensity = pl_orig.points[i].intensity;
         added_pt.curvature = pl_orig.points[i].time * time_unit_scale; // units: ms
 
+        // 如果 given_offset_time为false，可能是没有时间，则计算时间
         if (!given_offset_time)
         {
           double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
+          // 取每个ring的第一个点 角度值给 yaw_fp，curvature 为0，yaw_last为ring第一个点的角度 time_last为0
           if (is_first[layer])
           {
             // printf("layer: %d; is first: %d", layer, is_first[layer]);
@@ -392,6 +400,7 @@ void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
         pl_buff[layer].points.push_back(added_pt);
       }
 
+      // 计算每一个的距离types[i].range，以及每个点与下一个点的距离的平方 types[i].dista
       for (int j = 0; j < N_SCANS; j++)
       {
         PointCloudXYZI &pl = pl_buff[j];
@@ -786,7 +795,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
   // for(;;) 会创建一个无限循环，因为它没有条件来终止循环
   for(;;)
   {
-    // 如果i_cur的i或者i_nex的i超过pl点的数量，则退出
+    // 如果i_cur的i或者i_nex的i超过pl点的数量，则跳出循环
     if((i_cur >= pl.size()) || (i_nex >= pl.size())) break;
 
     // 如果有点小于 blind，则返回2
@@ -799,10 +808,12 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
     vy = pl[i_nex].y - pl[i_cur].y;
     vz = pl[i_nex].z - pl[i_cur].z;
     two_dis = vx*vx + vy*vy + vz*vz;
+    // 如果两点距离大于 group_dis ，则跳出循环
     if(two_dis >= group_dis)
     {
       break;
     }
+    // 将 types[i_nex].dista 加入到 disarr
     disarr.push_back(types[i_nex].dista);
     i_nex++;
   }

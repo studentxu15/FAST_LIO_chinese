@@ -54,6 +54,7 @@ V3F Zero3f(0, 0, 0);
 
 struct MeasureGroup     // Lidar data and imu dates for the curent process
 {
+    // 初始化
     MeasureGroup()
     {
         lidar_beg_time = 0.0;

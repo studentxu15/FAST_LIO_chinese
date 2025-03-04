@@ -291,9 +291,11 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
+    // 将提取的平面点添加到 lidar_buffer，将时间戳添加到 time_buffer，最后帧的时间last_timestamp_lidar为当前时间
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(msg->header.stamp.toSec());
     last_timestamp_lidar = msg->header.stamp.toSec();
+    // s_plot11 记录时间差值
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -377,6 +379,7 @@ double lidar_mean_scantime = 0.0;
 int    scan_num = 0;
 bool sync_packages(MeasureGroup &meas)
 {
+    // 如果 lidar_buffer 或者 imu_buffer为空，则返回false
     if (lidar_buffer.empty() || imu_buffer.empty()) {
         return false;
     }
@@ -384,8 +387,14 @@ bool sync_packages(MeasureGroup &meas)
     /*** push a lidar scan ***/
     if(!lidar_pushed)
     {
+        // 将 lidar_buffer 的第一帧点云及其时间 传递给 Measures.lidar
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
+        // 如果点不足两个，则点太少
+        // 将最后一个点的时间转为秒，如果小于0.5*lidar_mean_scantime，则
+        // lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime
+        // 否则，lidar_end_time 为开始时间 + 最后一个点的时间 单位为秒
+        // lidar_mean_scantime 为平均扫描时间
         if (meas.lidar->points.size() <= 1) // time too little
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
@@ -397,24 +406,28 @@ bool sync_packages(MeasureGroup &meas)
         }
         else
         {
+            // scan_num 表示已处理激光的数量
             scan_num ++;
             lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
             lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
         }
-
+        // 雷达结束时间传递给 meas.lidar_end_time
         meas.lidar_end_time = lidar_end_time;
 
         lidar_pushed = true;
     }
 
+    // 如果最后的imu时间低于最后的lidar时间, 则返回false
     if (last_timestamp_imu < lidar_end_time)
     {
         return false;
     }
 
     /*** push imu data, and pop from imu buffer ***/
+    // imu_buffer 中第一帧时间为 imu_time
     double imu_time = imu_buffer.front()->header.stamp.toSec();
     meas.imu.clear();
+    // 将早于 lidar_end_time的所有imu数据添加到 Measures.imu 队列，同时删除 imu_buffer 中的数据
     while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))
     {
         imu_time = imu_buffer.front()->header.stamp.toSec();
@@ -423,6 +436,7 @@ bool sync_packages(MeasureGroup &meas)
         imu_buffer.pop_front();
     }
 
+    // 将使用的雷达帧及其时间从 lidar_buffer 中删除
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
@@ -863,6 +877,7 @@ int main(int argc, char** argv)
     ros::Publisher pubPath          = nh.advertise<nav_msgs::Path> 
             ("/path", 100000);
 //------------------------------------------------------------------------------------------------------
+    // 由用户在终端中按下 Ctrl+C 组合键时发送给正在运行的程序。它的默认行为是终止程序的执行
     signal(SIGINT, SigHandle);
     ros::Rate rate(5000);
     bool status = ros::ok();
@@ -872,6 +887,9 @@ int main(int argc, char** argv)
         ros::spinOnce();
         if(sync_packages(Measures)) 
         {
+            // 初始化
+            // 初始 first_lidar_time 为雷达开始时间
+            // 将 ImuProcess 类中的 first_lidar_time 赋值为 first_lidar_time
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
@@ -889,6 +907,7 @@ int main(int argc, char** argv)
             svd_time   = 0;
             t0 = omp_get_wtime();
 
+            // 将储存激光雷达和点云的 Measures ，kf 和 feats_undistort
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
