@@ -211,13 +211,15 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   init_state.offset_R_L_I = Lidar_R_wrt_IMU;
   kf_state.change_x(init_state);
 
+  // 通过调用 kf_state.get_P() 来获取当前的协方差矩阵 P。这里 kf_state 是扩展卡尔曼滤波器的实例
   esekfom::esekf<state_ikfom, 12, input_ikfom>::cov init_P = kf_state.get_P();
   init_P.setIdentity();
   init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;
   init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;
   init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;
   init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;
-  init_P(21,21) = init_P(22,22) = 0.00001; 
+  init_P(21,21) = init_P(22,22) = 0.00001;
+  // 将更新后的协方差矩阵 init_P 应用回 kf_state 中。change_P 方法负责将新的协方差矩阵设置为当前状态估计器的协方差
   kf_state.change_P(init_P);
   last_imu_ = meas.imu.back();
 
@@ -363,14 +365,20 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
     imu_need_init_ = true;
     
-    last_imu_   = meas.imu.back();
+    // imu 最后一个值为 last_imu_
+    last_imu_ = meas.imu.back();
 
+    // 获取IMU状态
     state_ikfom imu_state = kf_state.get_x();
+    // 初始化迭代次数是否超过了最大设置的初始化计数 MAX_INI_COUNT
+    // 如果超过这个次数，表示IMU的初始化过程可以结束
     if (init_iter_num > MAX_INI_COUNT)
     {
+      // 更新加速度协方差
       cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
       imu_need_init_ = false;
-
+      
+      // 将加速度协方差和陀螺仪协方差重置为预定义的比例因子
       cov_acc = cov_acc_scale;
       cov_gyr = cov_gyr_scale;
       ROS_INFO("IMU Initial Done");

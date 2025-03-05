@@ -231,7 +231,8 @@ void lasermap_fov_segment()
 {
     cub_needrm.clear();
     kdtree_delete_counter = 0;
-    kdtree_delete_time = 0.0;    
+    kdtree_delete_time = 0.0;
+    //将点 XAxisPoint_body 转到世界坐标系下-> XAxisPoint_world 
     pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
     V3D pos_LiD = pos_lid;
     if (!Localmap_Initialized){
@@ -909,18 +910,23 @@ int main(int argc, char** argv)
 
             // 将储存激光雷达和点云的 Measures ，kf 和 feats_undistort
             p_imu->Process(Measures, kf, feats_undistort);
+            // 从卡尔曼滤波器中获取当前状态
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
+            // 检查特征点集合
             if (feats_undistort->empty() || (feats_undistort == NULL))
             {
                 ROS_WARN("No point, skip this scan!\n");
                 continue;
             }
 
+            // 当前的激光雷达开始时间与初始时间 first_lidar_time 之间的差是否小于设定的初始时间 INIT_TIME。
+            // 如果是，则设置 flg_EKF_inited 为 false，表示扩展卡尔曼滤波器（EKF）尚未初始化
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
             /*** Segment the map in lidar FOV ***/
+            // 激光雷达视野内的地图分割
             lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
