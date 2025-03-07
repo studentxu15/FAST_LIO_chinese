@@ -220,6 +220,7 @@ void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
 
 void points_cache_collect()
 {
+    // 从 KD 树中获取被移除的点，并将这些点存储到一个历史记录中
     PointVector points_history;
     ikdtree.acquire_removed_points(points_history);
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
@@ -235,6 +236,7 @@ void lasermap_fov_segment()
     //将点 XAxisPoint_body 转到世界坐标系下-> XAxisPoint_world 
     pointBodyToWorld(XAxisPoint_body, XAxisPoint_world);
     V3D pos_LiD = pos_lid;
+    // 初始化地图边界
     if (!Localmap_Initialized){
         for (int i = 0; i < 3; i++){
             LocalMap_Points.vertex_min[i] = pos_LiD(i) - cube_len / 2.0;
@@ -243,6 +245,7 @@ void lasermap_fov_segment()
         Localmap_Initialized = true;
         return;
     }
+    // 计算激光雷达位置到局部地图边界的距离。如果距离小于某个阈值（MOV_THRESHOLD * DET_RANGE），则需要移动局部地图
     float dist_to_map_edge[3][2];
     bool need_move = false;
     for (int i = 0; i < 3; i++){
@@ -251,9 +254,13 @@ void lasermap_fov_segment()
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE || dist_to_map_edge[i][1] <= MOV_THRESHOLD * DET_RANGE) need_move = true;
     }
     if (!need_move) return;
+
+    // 创建新的局部地图边界，并计算移动距离 mov_dist，这将用于更新边界
     BoxPointType New_LocalMap_Points, tmp_boxpoints;
     New_LocalMap_Points = LocalMap_Points;
     float mov_dist = max((cube_len - 2.0 * MOV_THRESHOLD * DET_RANGE) * 0.5 * 0.9, double(DET_RANGE * (MOV_THRESHOLD -1)));
+    
+    // 据计算的距离和需要移动的方向，调整局部地图边界，并将需要移除的区域记录到 cub_needrm 中
     for (int i = 0; i < 3; i++){
         tmp_boxpoints = LocalMap_Points;
         if (dist_to_map_edge[i][0] <= MOV_THRESHOLD * DET_RANGE){
@@ -270,9 +277,11 @@ void lasermap_fov_segment()
     }
     LocalMap_Points = New_LocalMap_Points;
 
+    // 收集点缓存，并记录需要从 KD 树中删除的区域
     points_cache_collect();
     double delete_begin = omp_get_wtime();
     if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    // 记录删除操作的时间
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
@@ -656,6 +665,8 @@ void publish_path(const ros::Publisher pubPath)
     }
 }
 
+// state_ikfom &s 表示传入系统的当前状态，包括位置、旋转矩阵和偏移量等信息
+// 动态共享数据结构，用于存储计算的结果，包括雅可比矩阵和测量值等
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
 {
     double match_start = omp_get_wtime();
@@ -668,12 +679,14 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         omp_set_num_threads(MP_PROC_NUM);
         #pragma omp parallel for
     #endif
+    // 对于每个特征点
     for (int i = 0; i < feats_down_size; i++)
     {
         PointType &point_body  = feats_down_body->points[i]; 
         PointType &point_world = feats_down_world->points[i]; 
 
         /* transform to world frame */
+        // 将激光点从局部坐标系变换到世界坐标系
         V3D p_body(point_body.x, point_body.y, point_body.z);
         V3D p_global(s.rot * (s.offset_R_L_I*p_body + s.offset_T_L_I) + s.pos);
         point_world.x = p_global(0);
@@ -681,14 +694,18 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         point_world.z = p_global(2);
         point_world.intensity = point_body.intensity;
 
+        // 用于储存查找到的临近点
         vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
 
         auto &points_near = Nearest_Points[i];
 
+        // 如果收敛了
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
+            // 在world坐标系下从ikdtree找到5个最近点用于平面拟合
             ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            // 最近点数大于NUM_MATCH_POINTS，且最大距离小于等于5,point_selected_surf设置为true
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -715,6 +732,8 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     
     effct_feat_num = 0;
 
+    // 将查找到平面点的点及其法向量分别添加到 laserCloudOri 和 corr_normvect
+    // 累加当前残差到总残差 total_residual 中
     for (int i = 0; i < feats_down_size; i++)
     {
         if (point_selected_surf[i])
@@ -733,42 +752,59 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         return;
     }
 
+    // 计算残差均值 res_mean_last
     res_mean_last = total_residual / effct_feat_num;
     match_time  += omp_get_wtime() - match_start;
     double solve_start_  = omp_get_wtime();
     
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
+    // 初始化雅可比矩阵 创建一个大小为 effct_feat_num x 12 的零矩阵，用于存储后续计算的测量雅可比矩阵
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
+    // 测量向量 h 调整为与有效特征点数量相同的大小
     ekfom_data.h.resize(effct_feat_num);
 
     for (int i = 0; i < effct_feat_num; i++)
     {
+        // 获取当前有效特征点
         const PointType &laser_p  = laserCloudOri->points[i];
+        // 将激光点的位置转换为一个 3D 向量 point_this_be
         V3D point_this_be(laser_p.x, laser_p.y, laser_p.z);
         M3D point_be_crossmat;
+        // 将激光点的向量转换为交叉矩阵（反对称矩阵）
         point_be_crossmat << SKEW_SYM_MATRX(point_this_be);
+        // 将激光点从局部坐标系转换到世界坐标系
         V3D point_this = s.offset_R_L_I * point_this_be + s.offset_T_L_I;
         M3D point_crossmat;
+        // 将转换后的点的向量转换为交叉矩阵（反对称矩阵）
         point_crossmat<<SKEW_SYM_MATRX(point_this);
 
         /*** get the normal vector of closest surface/corner ***/
+        // 获取与当前激光点对应的法向量
         const PointType &norm_p = corr_normvect->points[i];
+        // 将法向量转换为 3D 向量
         V3D norm_vec(norm_p.x, norm_p.y, norm_p.z);
 
         /*** calculate the Measuremnt Jacobian matrix H ***/
+        // 将法向量根据当前状态的旋转矩阵进行转换
         V3D C(s.rot.conjugate() *norm_vec);
+        // 通过交叉矩阵和法向量的变换计算出雅可比矩阵的相关部分
         V3D A(point_crossmat * C);
+        // 如果启用外参估计
         if (extrinsic_est_en)
         {
+            // 计算 B，它是与外部旋转相关的雅可比矩阵的部分
             V3D B(point_be_crossmat * s.offset_R_L_I.conjugate() * C); //s.rot.conjugate()*norm_vec);
+            // 将法向量以及 A、B、C 向量填充到雅可比矩阵的当前行
             ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), VEC_FROM_ARRAY(B), VEC_FROM_ARRAY(C);
         }
         else
         {
+            只填充法向量和 A 向量，后面几个值设为 0
             ekfom_data.h_x.block<1, 12>(i,0) << norm_p.x, norm_p.y, norm_p.z, VEC_FROM_ARRAY(A), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
         }
 
         /*** Measuremnt: distance to the closest surface/corner ***/
+        // 将测量值设置为当前法向量的强度的负值（通常用来表示点到最近表面的距离）
         ekfom_data.h(i) = -norm_p.intensity;
     }
     solve_time += omp_get_wtime() - solve_start_;
@@ -930,26 +966,36 @@ int main(int argc, char** argv)
             lasermap_fov_segment();
 
             /*** downsample the feature points in a scan ***/
+            // 将特征点云 feats_undistort 进行下采样，为 feats_down_body
             downSizeFilterSurf.setInputCloud(feats_undistort);
             downSizeFilterSurf.filter(*feats_down_body);
+            // 获取当前时间为 t1
             t1 = omp_get_wtime();
+            // feats_down_body 的点的数量为 feats_down_size
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
+            // 初始化kd树
             if(ikdtree.Root_Node == nullptr)
             {
                 if(feats_down_size > 5)
                 {
+                    // 为 KD 树设置降采样参数
                     ikdtree.set_downsample_param(filter_size_map_min);
+                    // 将降采样后的点从身体坐标系转换到世界坐标系,转换后的点为 feats_down_world
                     feats_down_world->resize(feats_down_size);
                     for(int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
+                    // 使用转换后的点云构建 KD 树
                     ikdtree.Build(feats_down_world->points);
                 }
                 continue;
             }
+            // 如果已经完成初始化
+            // 获取有效特征点的数量为 featsFromMapNum
             int featsFromMapNum = ikdtree.validnum();
+            // 获取 KD 树的当前大小为 kdtree_size_st
             kdtree_size_st = ikdtree.size();
             
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
@@ -961,10 +1007,13 @@ int main(int argc, char** argv)
                 continue;
             }
             
+            // 调整法向量和世界坐标系下点云大小都为 feats_down_size
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
 
+            // 将变换矩阵 offset_R_L_I 转为 欧拉角 ext_euler
             V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
+            // 记录信息
             fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
             <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
 
@@ -976,6 +1025,7 @@ int main(int argc, char** argv)
                 featsFromMap->points = ikdtree.PCL_Storage;
             }
 
+            // 调整点搜索索引和最近点数组的大小
             pointSearchInd_surf.resize(feats_down_size);
             Nearest_Points.resize(feats_down_size);
             int  rematch_num = 0;
@@ -986,10 +1036,15 @@ int main(int argc, char** argv)
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
+            // 调用卡尔曼滤波器的更新函数，传递激光点的协方差矩阵 LASER_POINT_COV 和求解时间 solve_H_time
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            // 获取更新后的状态
             state_point = kf.get_x();
+            // 将四元数转为欧拉角 euler_cur
             euler_cur = SO3ToEuler(state_point.rot);
+            // 根据更新后的状态计算激光雷达的位置
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            // 将更新后的旋转矩阵转换为四元数的各个分量，存储在 geoQuat 中
             geoQuat.x = state_point.rot.coeffs()[0];
             geoQuat.y = state_point.rot.coeffs()[1];
             geoQuat.z = state_point.rot.coeffs()[2];
@@ -998,10 +1053,12 @@ int main(int argc, char** argv)
             double t_update_end = omp_get_wtime();
 
             /******* Publish odometry *******/
+            // 发布里程计消息
             publish_odometry(pubOdomAftMapped);
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
+            // 更新地图
             map_incremental();
             t5 = omp_get_wtime();
             

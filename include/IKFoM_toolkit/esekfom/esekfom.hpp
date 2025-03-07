@@ -1618,20 +1618,26 @@ public:
 	//iterated error state EKF update modified for one specific system.
 	void update_iterated_dyn_share_modified(double R, double &solve_time) {
 		
+		// 创建一个 dyn_share 结构体，用于存储动态信息。初始化其有效性和收敛性为 true
+		// 将当前状态 x_ 和协方差 P_ 的值存储到 x_propagated 和 P_propagated 中，以便在迭代过程中使用
 		dyn_share_datastruct<scalar_type> dyn_share;
 		dyn_share.valid = true;
 		dyn_share.converge = true;
 		int t = 0;
 		state x_propagated = x_;
 		cov P_propagated = P_;
+		// 存储测量的自由度数量
 		int dof_Measurement; 
 		
+		// 存储卡尔曼增益的相关计算结果
 		Matrix<scalar_type, n, 1> K_h;
 		Matrix<scalar_type, n, n> K_x; 
 		
+		// dx_new 用于存储新的状态增量，初始值为零
 		vectorized_state dx_new = vectorized_state::Zero();
 		for(int i=-1; i<maximum_iter; i++)
 		{
+			// 调用 h_dyn_share 函数，更新 dyn_share 的状态信息
 			dyn_share.valid = true;	
 			h_dyn_share(x_, dyn_share);
 
@@ -1649,13 +1655,14 @@ public:
 			double solve_start = omp_get_wtime();
 			dof_Measurement = h_x_.rows();
 			vectorized_state dx;
+			// 通过 boxminus 函数计算当前状态与传播状态之间的差异，并将结果存储在 dx 和 dx_new 中
 			x_.boxminus(dx, x_propagated);
 			dx_new = dx;
 			
-			
-			
+			// 将协方差矩阵 P_ 重置为之前保存的协方差 P_propagated
 			P_ = P_propagated;
 			
+			// 对于每个 SO(3) 状态，计算其状态增量并更新协方差矩阵
 			Matrix<scalar_type, 3, 3> res_temp_SO3;
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
@@ -1675,6 +1682,7 @@ public:
 				}
 			}
 
+			// 对于 S(2) 状态进行增量更新和协方差更新
 			Matrix<scalar_type, 2, 2> res_temp_S2;
 			MTK::vect<2, scalar_type> seg_S2;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.S2_state.begin(); it != x_.S2_state.end(); it++) {
@@ -1712,6 +1720,7 @@ public:
 			}
 			*/
 
+			// 根据测量的自由度和当前协方差计算卡尔曼增益 K_h 和 K_x，用于更新状态估计
 			if(n > dof_Measurement)
 			{
 			//#ifdef USE_sparse
@@ -1812,10 +1821,13 @@ public:
 			}
 
 			//K_x = K_ * h_x_;
+			// 根据卡尔曼增益更新状态增量 dx_
 			Matrix<scalar_type, n, 1> dx_ = K_h + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; 
 			state x_before = x_;
+			// 将增量应用到状态 x_ 中
 			x_.boxplus(dx_);
 			dyn_share.converge = true;
+			// 检查状态增量是否在指定范围内，如果有超出限制的状态增量，则标记为不收敛
 			for(int i = 0; i < n ; i++)
 			{
 				if(std::fabs(dx_[i]) > limit[i])
@@ -1824,25 +1836,32 @@ public:
 					break;
 				}
 			}
+			// 如果收敛，增加计数器 t
 			if(dyn_share.converge) t++;
 			
+			// 如果在最后两次迭代中未收敛，则强制将收敛标记设为 true
 			if(!t && i == maximum_iter - 2)
 			{
 				dyn_share.converge = true;
 			}
 
+
 			if(t > 1 || i == maximum_iter - 1)
 			{
+				// 将当前的协方差矩阵 P_ 赋值给 L_
 				L_ = P_;
 				//std::cout << "iteration time" << t << "," << i << std::endl; 
 				Matrix<scalar_type, 3, 3> res_temp_SO3;
 				MTK::vect<3, scalar_type> seg_SO3;
 				for(typename std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
 					int idx = (*it).first;
+					// 通过索引 idx 从增量 dx_ 中提取出对应的 SO(3) 的状态增量，并存入 seg_SO3
 					for(int i = 0; i < 3; i++){
 						seg_SO3(i) = dx_(i + idx);
 					}
+					// 将 seg_SO3 转换为旋转矩阵，并转置
 					res_temp_SO3 = MTK::A_matrix(seg_SO3).transpose();
+					// 使用旋转矩阵更新协方差矩阵 L_ 的相应部分
 					for(int i = 0; i < n; i++){
 						L_. template block<3, 1>(idx, i) = res_temp_SO3 * (P_. template block<3, 1>(idx, i)); 
 					}
@@ -1854,10 +1873,12 @@ public:
 					// }
 					// else
 					// {
+						// 更新增益矩阵 K_x 的相关部分，使用旋转矩阵调整增益
 						for(int i = 0; i < 12; i++){
 							K_x. template block<3, 1>(idx, i) = res_temp_SO3 * (K_x. template block<3, 1>(idx, i));
 						}
 					//}
+					// 使用旋转矩阵的转置，更新 L_ 和 P_ 的相关部分
 					for(int i = 0; i < n; i++){
 						L_. template block<1, 3>(i, idx) = (L_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
 						P_. template block<1, 3>(i, idx) = (P_. template block<1, 3>(i, idx)) * res_temp_SO3.transpose();
