@@ -229,37 +229,50 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 {
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   auto v_imu = meas.imu;
+  // 将变量 last_imu_ 插入到 v_imu 的前面
   v_imu.push_front(last_imu_);
+  // v_imu 中最早的时间和最后时间分别是 imu_beg_time 和 imu_end_time
   const double &imu_beg_time = v_imu.front()->header.stamp.toSec();
   const double &imu_end_time = v_imu.back()->header.stamp.toSec();
+  // 雷达帧的最早时间和最后时间分别是 pcl_beg_time 和 pcl_end_time
   const double &pcl_beg_time = meas.lidar_beg_time;
   const double &pcl_end_time = meas.lidar_end_time;
   
   /*** sort point clouds by offset time ***/
+  // 将 meas.lidar 中的点云数据复制到 pcl_out 中
   pcl_out = *(meas.lidar);
+  // 将点云按照时间顺序进行排序
   sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
   // cout<<"[ IMU Process ]: Process lidar from "<<pcl_beg_time<<" to "<<pcl_end_time<<", " \
   //          <<meas.imu.size()<<" imu msgs from "<<imu_beg_time<<" to "<<imu_end_time<<endl;
 
   /*** Initialize IMU pose ***/
+  // 获取当前状态给到 imu_state
   state_ikfom imu_state = kf_state.get_x();
   IMUpose.clear();
+  // 初始 IMU 位姿插入 IMUpose 中
   IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
 
   /*** forward propagation at each imu point ***/
   V3D angvel_avr, acc_avr, acc_imu, vel_imu, pos_imu;
   M3D R_imu;
 
+  // 初始化间隔时间
   double dt = 0;
 
+  // 初始化卡尔曼滤波器的输入 in，通常是一个结构体或类，包含 IMU 的角速度（gyro）和加速度（acc），用于定义系统输入
   input_ikfom in;
+  // 遍历存储在 v_imu 中的 IMU 数据，从开始到倒数第二帧
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
   {
+    // 当前imu帧数据为 head，下一帧imu数据为 tail
     auto &&head = *(it_imu);
     auto &&tail = *(it_imu + 1);
     
+    // 如果 下一帧数据在上次雷达结束时间之前，则跳过
     if (tail->header.stamp.toSec() < last_lidar_end_time_)    continue;
     
+    // 计算两帧imu数据的平均角速度和加速度 angvel_avr 和 acc_avr
     angvel_avr<<0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
                 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
                 0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
@@ -269,8 +282,11 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
 
     // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " " << acc_avr.transpose() << endl;
 
+    // 将加速度值归一化
     acc_avr     = acc_avr * G_m_s2 / mean_acc.norm(); // - state_inout.ba;
 
+    // 如果当前帧时间戳在上次激光雷达结束之前，则 dt = 下一帧时间戳 - last_lidar
+    // 否则，等于下一帧时间戳 - 上一帧时间戳
     if(head->header.stamp.toSec() < last_lidar_end_time_)
     {
       dt = tail->header.stamp.toSec() - last_lidar_end_time_;
@@ -281,29 +297,38 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
     }
     
+    // 将平均加速度和角速度给到 in
     in.acc = acc_avr;
     in.gyro = angvel_avr;
+    // 设置噪声协方差矩阵 Q
     Q.block<3, 3>(0, 0).diagonal() = cov_gyr;
     Q.block<3, 3>(3, 3).diagonal() = cov_acc;
     Q.block<3, 3>(6, 6).diagonal() = cov_bias_gyr;
     Q.block<3, 3>(9, 9).diagonal() = cov_bias_acc;
+    // 调用卡尔曼滤波器的 predict 方法，根据时间间隔 dt 和噪声协方差矩阵 Q，对当前状态进行预测
     kf_state.predict(dt, Q, in);
 
     /* save the poses at each IMU measurements */
+    // 从卡尔曼滤波器中获取更新后的状态
     imu_state = kf_state.get_x();
+    // 矫正角速度和加速度，减去滤波器估计的偏置值
     angvel_last = angvel_avr - imu_state.bg;
     acc_s_last  = imu_state.rot * (acc_avr - imu_state.ba);
+    // 将重力矢量 imu_state.grav 加到加速度中，得到最终的加速度
     for(int i=0; i<3; i++)
     {
       acc_s_last[i] += imu_state.grav[i];
     }
+    // 计算当前 IMU 时间点相对于 LiDAR 开始时间的偏移 offs_t
     double &&offs_t = tail->header.stamp.toSec() - pcl_beg_time;
+    // 使用 set_pose6d 保存 IMU 的当前状态
     IMUpose.push_back(set_pose6d(offs_t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
   }
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
   double note = pcl_end_time > imu_end_time ? 1.0 : -1.0;
   dt = note * (pcl_end_time - imu_end_time);
+  // 调用卡尔曼滤波器的 predict 方法，根据时间间隔 dt 和噪声协方差矩阵 Q，对当前状态进行预测
   kf_state.predict(dt, Q, in);
   
   imu_state = kf_state.get_x();
@@ -311,10 +336,13 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   last_lidar_end_time_ = pcl_end_time;
 
   /*** undistort each lidar point (backward propagation) ***/
+  // 检查点云数据是否为空
   if (pcl_out.points.begin() == pcl_out.points.end()) return;
+  // it_pcl 指向点云数据的最后一个点，用于从最后一帧开始进行去畸变
   auto it_pcl = pcl_out.points.end() - 1;
   for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
   {
+    // 前一帧和后一帧的状态分别为 head 和 tail
     auto head = it_kp - 1;
     auto tail = it_kp;
     R_imu<<MAT_FROM_ARRAY(head->rot);
@@ -324,6 +352,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     acc_imu<<VEC_FROM_ARRAY(tail->acc);
     angvel_avr<<VEC_FROM_ARRAY(tail->gyr);
 
+    // 如果当前点的时间戳大于 head 的时间戳（offset_time），则继续处理，否则退出循环并处理下一个 IMU 位姿段
     for(; it_pcl->curvature / double(1000) > head->offset_time; it_pcl --)
     {
       dt = it_pcl->curvature / double(1000) - head->offset_time;
@@ -332,13 +361,16 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
        * Note: Compensation direction is INVERSE of Frame's moving direction
        * So if we want to compensate a point at timestamp-i to the frame-e
        * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
+      // 计算当前点在这段时间中的旋转矩阵
       M3D R_i(R_imu * Exp(angvel_avr, dt));
       
+      // 根据 IMU 的加速度、速度、位置，计算当前时间点的平移量 T_ei
       V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
       V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
       V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
       
       // save Undistorted points and their rotation
+      // 将去畸变后的点坐标 P_compensate 更新到点云点的位置中
       it_pcl->x = P_compensate(0);
       it_pcl->y = P_compensate(1);
       it_pcl->z = P_compensate(2);
